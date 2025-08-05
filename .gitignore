@@ -67,8 +67,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-multiAgentSystem/
-multiAgentSystem/*
 .env
 .venv
 env/

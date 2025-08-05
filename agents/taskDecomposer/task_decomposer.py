@@ -1,5 +1,5 @@
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 from langchain_tavily import TavilySearch
 
 from langgraph.graph import StateGraph
@@ -48,7 +48,7 @@ class TaskDecomposerState(BaseModel):
     output: Optional[TaskPlan] = None
     error: Optional[str] = None
     should_stop: bool = False
-    number_of_iterations: int = 1
+    number_of_iterations: int = 0
     
     def increase(self) -> None:
         self.number_of_iterations += 1
@@ -85,18 +85,19 @@ def tavily_search(state: TaskDecomposerState) -> TaskDecomposerState:
 
         # Parse the output to get a summary of the web findings
         summary_lines = []
-        for entry in result.get("results", []):
+        for i, entry in enumerate(result.get("results", [])):
             title = entry.get("title", "Untitled")
             content = entry.get("content", "")[:500].strip()
+            score = entry.get("score", 'No score found')
 
-            summary_lines.append(f"- {title}\n  {content}\n")
+            summary_lines.append(f"{i}. Score: {score} - {title}\n  {content}\n")
 
         web_summary = "\n---\n".join(summary_lines) if summary_lines else "No relevant web results found."
 
         # Format the new input with web findings appended
         enriched_input = (
             f'{state.user_input.strip()}\n\n'
-            f'#### Web Findings:\n{web_summary}\n'
+            f'#### Web Findings:\nScore is a number between 0 and 1, with 1 being the most relevant.\n{web_summary}\n'
         )
 
         print(f'[NODE] [INFO] Original prompt: {state.user_input}\nEnriched prompt: {enriched_input}') if DEBUG else None
@@ -114,6 +115,8 @@ def decompose_prompt(state: TaskDecomposerState) -> TaskDecomposerState:
     print('\n[NODE] decompose_prompt') if DEBUG else None
 
     try:
+        state.increase()
+
         # format the prompt
         agent_ideas = (
             json.dumps(state.output.model_dump(), indent=4)
@@ -133,8 +136,6 @@ def decompose_prompt(state: TaskDecomposerState) -> TaskDecomposerState:
         # update the state
         if state.output and state.output == response:
             state.stop()
-        else:
-            state.increase()
 
         if DEBUG and state.output:
             print(f'[NODE] [INFO] Previous output: {state.output.model_dump_json()}')
@@ -153,7 +154,7 @@ def should_continue(state: TaskDecomposerState) -> Literal['decompose_prompt', '
     This node checks if the task decomposition should continue.
     '''
     print('\n[CONDITION] should_continue') if DEBUG else None
-    return 'end' if state.should_stop else 'retry'
+    return 'end' if state.should_stop or state.number_of_iterations > 3 else 'retry'
 
 
 ''' Graph '''
@@ -187,11 +188,28 @@ if __name__ == '__main__':
     with open(f'./graphs/task_decomposer_app.png', 'wb') as f:
         f.write(task_decomposer_app.get_graph().draw_mermaid_png())
 
+    
+    # Connect to langsmith
+    from langsmith import Client
+    client = Client()
+
+    config = {
+        'configurable': {
+            'user_id': 'Test-TaskDecomposer',
+            "run_name": "Test-TaskDecomposer",
+            "tags": ["TaskDecomposer", "deepseek"],
+            "metadata": {"user_case": "tool-creating-agent"}
+        }
+    }
+
+
 
     # Run the graph
     # 'I want an agent that knows about dolphins.'
-    user = TaskDecomposerState(user_input= 'I want an agent that thinks and creates tools for LLM agents to use, for specific topics, which will be provided by the user.')
-    result = task_decomposer_app.invoke(user)
+    # 'I want an agent to help me, guide me and test me on my math course.'
+    # 'I want an agent that thinks and creates tools for LLM agents to use, for specific topics, which will be provided by the user.'
+    user = TaskDecomposerState(user_input= 'I want an agent to help me about the most difficult topic today.')
+    result = task_decomposer_app.invoke(user, config)
 
     print('\n[MAIN]', result)
 
