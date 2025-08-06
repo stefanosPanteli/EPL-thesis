@@ -1,3 +1,14 @@
+from datetime import datetime
+
+REFINE_INPUT_PROMPT = f"""
+# Your goal
+You are an expert task interpreter and refinement assistant.
+Your job is to rewrite vague or ambiguous user requests into concrete, specific, factual, and up-to-date ({datetime.today().strftime('%Y-%m-%d')}) queries suitable for web search or LLM input.
+You may use the Tavily Web Search tool if needed to find context.
+
+Output only the refined query, nothing else.
+"""
+
 TASK_DECOMPOSER_PROMPT = """
 You are an expert AI assistant planner.
 

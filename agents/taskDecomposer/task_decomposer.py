@@ -1,5 +1,5 @@
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_tavily import TavilySearch
 
 from langgraph.graph import StateGraph
@@ -16,11 +16,13 @@ from pydantic import BaseModel, Field
 import prompts
 
 ''' Constants '''
-load_dotenv(dotenv_path= Path(__file__).resolve().parent.parent.parent / ".env")
+load_dotenv(dotenv_path= Path(__file__).resolve().parent.parent.parent / '.env')
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-DEBUG = os.getenv("DEBUG")
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+TAVILY_API_KEY = os.getenv('TAVILY_API_KEY')
+DEBUG = os.getenv('DEBUG')
+
+print('\n[INFO] [AGENT] Task Decomposer') if DEBUG else None
 
 ''' Ouput Schemas '''
 class SingleAgentPlan(BaseModel):
@@ -45,6 +47,7 @@ class TaskPlan(BaseModel):
 ''' Input Schema '''
 class TaskDecomposerState(BaseModel):
     user_input: str
+    refined_input: str = ''
     output: Optional[TaskPlan] = None
     error: Optional[str] = None
     should_stop: bool = False
@@ -59,8 +62,11 @@ class TaskDecomposerState(BaseModel):
 
 
 ''' Tools '''
-tavily_tool = TavilySearch(
+tavily_search_tool = TavilySearch(
     tavily_api_key= TAVILY_API_KEY
+)
+tavily_tool = tavily_search_tool.as_tool(
+    description= 'Use Tavily to search the web for relevant information to help you refine the user input.'
 )
 
 
@@ -71,36 +77,62 @@ llm = ChatOpenAI(
     model= 'deepseek/deepseek-chat-v3-0324:free', 
     temperature=0
 )
+refiner = llm.bind_tools([tavily_tool])
 
 
 ''' Nodes'''
+def refine_user_input(state: TaskDecomposerState) -> TaskDecomposerState:
+    print('\n[NODE] refine_user_input') if DEBUG else None
+    try:
+        prompt = prompts.REFINE_INPUT_PROMPT
+
+        # call the LLM, and ensure it returns a TaskPlan
+        refined_text = refiner.invoke(
+            [SystemMessage(content= prompt), HumanMessage(content= state.user_input)]
+        ).content.strip().replace('"', '').replace("'", "")
+
+        print(f'[NODE] [INFO] Refined input: {refined_text}') if DEBUG else None
+
+        return state.model_copy(update={'refined_input': refined_text})
+
+    except Exception as e:
+        print('[NODE] [ERR]', e) if DEBUG else None
+        return state.model_copy(update={'error': str(e)})
+
+
 def tavily_search(state: TaskDecomposerState) -> TaskDecomposerState:
     '''
     Use Tavily to search the web for relevant information about the topic.
     '''
     print('\n[NODE] tavily_search') if DEBUG else None
     try:
-        # Run the search using the original prompt
-        result = tavily_tool.invoke(state.user_input)
+        # Run the search using the refined input or the original user input
+        search_query = state.refined_input or state.user_input
+        result = tavily_search_tool.invoke(search_query)
 
         # Parse the output to get a summary of the web findings
         summary_lines = []
-        for i, entry in enumerate(result.get("results", [])):
-            title = entry.get("title", "Untitled")
-            content = entry.get("content", "")[:500].strip()
-            score = entry.get("score", 'No score found')
+        for i, entry in enumerate(result.get('results', [])):
+            title = entry.get('title', 'Untitled')
+            content = entry.get('content', '')[:500].strip()
+            score = entry.get('score', 'No score found')
+            if score < 0.35: # Skip irrelevant results
+                continue
 
-            summary_lines.append(f"{i}. Score: {score} - {title}\n  {content}\n")
+            summary_lines.append(f'{i}. Score: {score} - {title}\n  {content}\n')
 
-        web_summary = "\n---\n".join(summary_lines) if summary_lines else "No relevant web results found."
+        web_summary = '\n---\n'.join(summary_lines) if summary_lines else 'No relevant web results found.'
 
         # Format the new input with web findings appended
         enriched_input = (
-            f'{state.user_input.strip()}\n\n'
-            f'#### Web Findings:\nScore is a number between 0 and 1, with 1 being the most relevant.\n{web_summary}\n'
+            f'User input: {state.user_input.strip()}\n\n'
+            f'Refined input: {state.refined_input.strip()}\n\n'
+            f'---\n\n'
+            f'#### Web Findings (query: "{search_query}"):\n'
+            f'Score is 0-1, with 1 most relevant.\n{web_summary}\n'
         )
 
-        print(f'[NODE] [INFO] Original prompt: {state.user_input}\nEnriched prompt: {enriched_input}') if DEBUG else None
+        print(f'[NODE] [INFO] Enriched input: {enriched_input}') if DEBUG else None
 
         return state.model_copy(update={'user_input': enriched_input})
     
@@ -120,7 +152,7 @@ def decompose_prompt(state: TaskDecomposerState) -> TaskDecomposerState:
         # format the prompt
         agent_ideas = (
             json.dumps(state.output.model_dump(), indent=4)
-            if state.output else "{}"
+            if state.output else '{}'
         )
 
         prompt = prompts.TASK_DECOMPOSER_PROMPT.format(
@@ -148,8 +180,8 @@ def decompose_prompt(state: TaskDecomposerState) -> TaskDecomposerState:
         return state.model_copy(update={'error': str(e)})
 
 
-''' Conditional Nodes '''
-def should_continue(state: TaskDecomposerState) -> Literal['decompose_prompt', '__end__']:
+''' Conditional Functions '''
+def should_continue(state: TaskDecomposerState) -> Literal['decompose_prompt', 'end']:
     '''
     This node checks if the task decomposition should continue.
     '''
@@ -160,10 +192,12 @@ def should_continue(state: TaskDecomposerState) -> Literal['decompose_prompt', '
 ''' Graph '''
 task_decomposer_graph = StateGraph(TaskDecomposerState)
 
-task_decomposer_graph.add_node('decompose_prompt', decompose_prompt)
+task_decomposer_graph.add_node('refiner', refine_user_input)
 task_decomposer_graph.add_node('tavily_search', tavily_search)
+task_decomposer_graph.add_node('decompose_prompt', decompose_prompt)
 
-task_decomposer_graph.add_edge(START, 'tavily_search')
+task_decomposer_graph.add_edge(START, 'refiner')
+task_decomposer_graph.add_edge('refiner', 'tavily_search')
 task_decomposer_graph.add_edge('tavily_search', 'decompose_prompt')
 task_decomposer_graph.add_conditional_edges(
     'decompose_prompt', 
@@ -196,19 +230,18 @@ if __name__ == '__main__':
     config = {
         'configurable': {
             'user_id': 'Test-TaskDecomposer',
-            "run_name": "Test-TaskDecomposer",
-            "tags": ["TaskDecomposer", "deepseek"],
-            "metadata": {"user_case": "tool-creating-agent"}
+            'run_name': 'Test-TaskDecomposer',
+            'tags': ['TaskDecomposer', 'deepseek'],
+            'metadata': {'user_case': 'tool-creating-agent'}
         }
     }
-
-
 
     # Run the graph
     # 'I want an agent that knows about dolphins.'
     # 'I want an agent to help me, guide me and test me on my math course.'
     # 'I want an agent that thinks and creates tools for LLM agents to use, for specific topics, which will be provided by the user.'
-    user = TaskDecomposerState(user_input= 'I want an agent to help me about the most difficult topic today.')
+    # 'I want an agent that helps me about the most difficult topic today (1).'
+    user = TaskDecomposerState(user_input= 'I want an agent to help me, guide me and test me on my math course.')
     result = task_decomposer_app.invoke(user, config)
 
     print('\n[MAIN]', result)

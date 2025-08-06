@@ -5,3 +5,4 @@ IPython==9.4.0
 langchain-openai==0.3.28
 dotenv==0.9.9
 langsmith==0.4.10
+datetime==5.5
