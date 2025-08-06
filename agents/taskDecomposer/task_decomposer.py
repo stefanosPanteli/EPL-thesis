@@ -38,23 +38,23 @@ refined = task_decomposer_app.invoke(graph_input)
 #                       You can hire a coach through...',
 #     'refined_input': 'I am looking to hire a personal fitness trainer for customized workout guidance.',
 #     'output': {
-#         type: 'multi-agent',
-#         justification: 'While the core need is fitness training, optimal results require complementary nutrition guidance and progress tracking capabilities.',
-#         agents: [
+#         'type': 'multi-agent',
+#         'justification': 'While the core need is fitness training, optimal results require complementary nutrition guidance and progress tracking capabilities.',
+#         'agents': [
 #             {
-#                 role: 'Fitness Coach',
-#                 scope: 'Provide customized workout plans and guidance'
+#                 'role': 'Fitness Coach',
+#                 'scope': 'Provide customized workout plans and guidance'
 #             },
 #             {
-#                 role: 'Nutrition Advisor',
-#                 scope: 'Offer dietary recommendations to complement fitness goals'
+#                 'role': 'Nutrition Advisor',
+#                 'scope': 'Offer dietary recommendations to complement fitness goals'
 #             },
 #             {
-#                 role: 'Progress Tracker',
-#                 scope: 'Monitor and analyze fitness metrics and improvements'
+#                 'role': 'Progress Tracker',
+#                 'scope': 'Monitor and analyze fitness metrics and improvements'
 #             }
 #         ],
-#     }
+#     },
 #     'should_stop': True,
 #     'number_of_iterations': 2
 # }
