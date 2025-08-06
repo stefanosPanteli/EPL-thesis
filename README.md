@@ -1,5 +1,6 @@
 # EPL-thesis
 Multi-agent system for the thesis.
+
 `author:` Stefanos Panteli
 
 # Agents
@@ -8,6 +9,7 @@ The following agents are used in the system:
 
 ## Task Decomposer
 ***Purpose:*** Analyzes the request and determines whether a single agent or multiple specialized agents are needed.
+
 ***Input:*** 
 ```json
 {
@@ -37,6 +39,7 @@ The following agents are used in the system:
 
 ## User Input Refiner
 ***Purpose:*** Improves and standardizes the input so other agents or search tools can interpret it better.
+
 ***Input:*** 
 ```json
 {
@@ -53,6 +56,7 @@ The following agents are used in the system:
 
 ## Agent
 ***Purpose:*** 
+
 ***Input:*** 
 ```json
 
