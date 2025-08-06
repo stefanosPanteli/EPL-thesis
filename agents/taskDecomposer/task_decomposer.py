@@ -1,3 +1,69 @@
+"""
+- `author:` Stefanos Panteli
+- `date:` 2025-08-05
+- `description:` Gets a user input and decomposes it into tasks, which can then be executed by other agents.
+
+## How to use
+1. Import the app. (`from agents.taskDecomposer.task_decomposer import task_decomposer_app`)
+2. Input a dict with the following keys:
+    - `user_input: str`: The user input to be decomposed.
+3. Invoke the app.
+4. Get the output dict with the following keys:
+    - `user_input: str`: The user input, may include web findings.
+    - `refined_input: str`: The refined user input.
+    - `output: Optional[TaskPlan]`: The decomposed task plan.
+        - `type: Literal['single-agent', 'multi-agent']`: Whether the task requires a single agent or multiple agents.
+        - `justification: str`: Justification for the agent's type assignment.
+        - `agents: List[SingleAgentPlan]`: List of agents involved in the task.
+            - `role: str`: Role of the agent.
+            - `scope: str`: Scope of the agent's responsibility.
+    - `error: Optional[str]`: The error, if any.
+    - `should_stop: bool`: The flag to stop the task decomposition.
+    - `number_of_iterations: int`: The number of iterations.
+
+## Usage
+```python
+from agents.taskDecomposer.task_decomposer import task_decomposer_app
+graph_input = {'user_input': 'I want a personall fitness coach.'}
+
+refined = task_decomposer_app.invoke(graph_input)
+
+# refined = {
+#     'user_input': 'User input: I want a personal fitness coach.\n\n \
+#                    Refined input: I am looking to hire a personal fitness trainer for customized workout guidance. \
+#                    \n\n---\n\n \
+#                    #### Web Findings (query: "I am looking to hire a personal fitness trainer for customized workout guidance."):\n \
+#                    Score is 0-1, with 1 most relevant.\n \
+#                    0. Score: 0.8095324 - Virtual real person trainer for custom workout plan?\n \
+#                       You can hire a coach through...',
+#     'refined_input': 'I am looking to hire a personal fitness trainer for customized workout guidance.',
+#     'output': {
+#         type: 'multi-agent',
+#         justification: 'While the core need is fitness training, optimal results require complementary nutrition guidance and progress tracking capabilities.',
+#         agents: [
+#             {
+#                 role: 'Fitness Coach',
+#                 scope: 'Provide customized workout plans and guidance'
+#             },
+#             {
+#                 role: 'Nutrition Advisor',
+#                 scope: 'Offer dietary recommendations to complement fitness goals'
+#             },
+#             {
+#                 role: 'Progress Tracker',
+#                 scope: 'Monitor and analyze fitness metrics and improvements'
+#             }
+#         ],
+#     }
+#     'should_stop': True,
+#     'number_of_iterations': 2
+# }
+```
+"""
+
+
+
+''' Imports '''
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_tavily import TavilySearch
@@ -7,13 +73,17 @@ from langgraph.constants import END, START
 
 import os
 import json
+import traceback
 from pathlib import Path
 from dotenv import load_dotenv
 
 from typing import Literal, List, Optional
 from pydantic import BaseModel, Field
 
-import prompts
+from agents.taskDecomposer import prompts
+from agents.userInputRefiner.user_input_refiner import user_input_refiner_app
+
+
 
 ''' Constants '''
 load_dotenv(dotenv_path= Path(__file__).resolve().parent.parent.parent / '.env')
@@ -22,9 +92,12 @@ OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 TAVILY_API_KEY = os.getenv('TAVILY_API_KEY')
 DEBUG = os.getenv('DEBUG')
 
-print('\n[INFO] [AGENT] Task Decomposer') if DEBUG else None
+print('\n[AGENT] [INFO] [STARTUP] Task Decomposer') if DEBUG else None
 
-''' Ouput Schemas '''
+
+
+""" Schemas """
+''' General Schemas '''
 class SingleAgentPlan(BaseModel):
     role: str = Field(description= 'Role of the agent.')
     scope: str = Field(description= 'Scope of the agent\'s responsibility.')
@@ -61,13 +134,12 @@ class TaskDecomposerState(BaseModel):
         self.should_stop = True
 
 
+
 ''' Tools '''
 tavily_search_tool = TavilySearch(
     tavily_api_key= TAVILY_API_KEY
 )
-tavily_tool = tavily_search_tool.as_tool(
-    description= 'Use Tavily to search the web for relevant information to help you refine the user input.'
-)
+
 
 
 ''' LLM '''
@@ -77,26 +149,22 @@ llm = ChatOpenAI(
     model= 'deepseek/deepseek-chat-v3-0324:free', 
     temperature=0
 )
-refiner = llm.bind_tools([tavily_tool])
+
 
 
 ''' Nodes'''
 def refine_user_input(state: TaskDecomposerState) -> TaskDecomposerState:
     print('\n[NODE] refine_user_input') if DEBUG else None
     try:
-        prompt = prompts.REFINE_INPUT_PROMPT
+        # Call the user input refiner app
+        graph_input = {'user_input': state.user_input}
+        refined = user_input_refiner_app.invoke(graph_input)
 
-        # call the LLM, and ensure it returns a TaskPlan
-        refined_text = refiner.invoke(
-            [SystemMessage(content= prompt), HumanMessage(content= state.user_input)]
-        ).content.strip().replace('"', '').replace("'", "")
-
-        print(f'[NODE] [INFO] Refined input: {refined_text}') if DEBUG else None
-
-        return state.model_copy(update={'refined_input': refined_text})
+        return state.model_copy(update={'user_input': refined['corrected_original'] or state.user_input, 'refined_input': refined['refined_text']})
 
     except Exception as e:
         print('[NODE] [ERR]', e) if DEBUG else None
+        traceback.print_exc() if DEBUG else None
         return state.model_copy(update={'error': str(e)})
 
 
@@ -112,7 +180,7 @@ def tavily_search(state: TaskDecomposerState) -> TaskDecomposerState:
 
         # Parse the output to get a summary of the web findings
         summary_lines = []
-        for i, entry in enumerate(result.get('results', [])):
+        for i, entry in enumerate(result.get('results', []), 1):
             title = entry.get('title', 'Untitled')
             content = entry.get('content', '')[:500].strip()
             score = entry.get('score', 'No score found')
@@ -138,6 +206,7 @@ def tavily_search(state: TaskDecomposerState) -> TaskDecomposerState:
     
     except Exception as e:
         print('[NODE] [ERR]', e) if DEBUG else None
+        traceback.print_exc() if DEBUG else None
         return state
 
 def decompose_prompt(state: TaskDecomposerState) -> TaskDecomposerState:
@@ -177,7 +246,9 @@ def decompose_prompt(state: TaskDecomposerState) -> TaskDecomposerState:
     except Exception as e:
         # update the state, if an error occurs
         print('[NODE] [ERR]', e) if DEBUG else None
+        traceback.print_exc() if DEBUG else None
         return state.model_copy(update={'error': str(e)})
+
 
 
 ''' Conditional Functions '''
@@ -187,6 +258,7 @@ def should_continue(state: TaskDecomposerState) -> Literal['decompose_prompt', '
     '''
     print('\n[CONDITION] should_continue') if DEBUG else None
     return 'end' if state.should_stop or state.number_of_iterations > 3 else 'retry'
+
 
 
 ''' Graph '''
@@ -211,20 +283,24 @@ task_decomposer_graph.add_conditional_edges(
 task_decomposer_app = task_decomposer_graph.compile()
 
 
+
 ''' Testing '''
 if __name__ == '__main__':
     from IPython.display import Image
 
     # Visualize the graph
     Image(task_decomposer_app.get_graph().draw_mermaid_png())
-    if not os.path.exists('./graphs'):
-        os.makedirs('./graphs')
-    with open(f'./graphs/task_decomposer_app.png', 'wb') as f:
+    parent_dir = Path(__file__).resolve().parent
+    if not os.path.exists(parent_dir / 'graphs'):
+        os.makedirs(parent_dir / 'graphs')
+    with open(parent_dir / 'graphs/task_decomposer_app.png', 'wb') as f:
         f.write(task_decomposer_app.get_graph().draw_mermaid_png())
 
     
     # Connect to langsmith
     from langsmith import Client
+    os.environ['LANGCHAIN_PROJECT'] = 'TaskDecomposer'
+    os.environ['LANGSMITH_PROJECT'] = 'TaskDecomposer'
     client = Client()
 
     config = {
@@ -232,16 +308,16 @@ if __name__ == '__main__':
             'user_id': 'Test-TaskDecomposer',
             'run_name': 'Test-TaskDecomposer',
             'tags': ['TaskDecomposer', 'deepseek'],
-            'metadata': {'user_case': 'tool-creating-agent'}
         }
     }
 
     # Run the graph
+    # 'I want a personall fitness coach.'
     # 'I want an agent that knows about dolphins.'
     # 'I want an agent to help me, guide me and test me on my math course.'
     # 'I want an agent that thinks and creates tools for LLM agents to use, for specific topics, which will be provided by the user.'
     # 'I want an agent that helps me about the most difficult topic today (1).'
-    user = TaskDecomposerState(user_input= 'I want an agent to help me, guide me and test me on my math course.')
+    user = TaskDecomposerState(user_input= 'I want a personall fitness coach.')
     result = task_decomposer_app.invoke(user, config)
 
     print('\n[MAIN]', result)
