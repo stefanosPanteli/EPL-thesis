@@ -81,7 +81,6 @@ from typing import Literal, List, Optional
 from pydantic import BaseModel, Field
 
 from agents.taskDecomposer import prompts
-from agents.userInputRefiner.user_input_refiner import user_input_refiner_app
 
 
 
@@ -117,7 +116,7 @@ class TaskPlan(BaseModel):
             all(agent == other_agent for agent, other_agent in zip(self.agents, other.agents))
         )
 
-''' Input Schema '''
+''' Input/Output Schema '''
 class TaskDecomposerState(BaseModel):
     user_input: str
     refined_input: str = ''
@@ -143,31 +142,16 @@ tavily_search_tool = TavilySearch(
 
 
 ''' LLM '''
-llm = ChatOpenAI(
+decomposer = ChatOpenAI(
     base_url= 'https://openrouter.ai/api/v1', 
     api_key= OPENROUTER_API_KEY,
     model= 'deepseek/deepseek-chat-v3-0324:free', 
     temperature=0
-)
+).with_structured_output(TaskPlan)
 
 
 
 ''' Nodes'''
-def refine_user_input(state: TaskDecomposerState) -> TaskDecomposerState:
-    print('\n[NODE] refine_user_input') if DEBUG else None
-    try:
-        # Call the user input refiner app
-        graph_input = {'user_input': state.user_input}
-        refined = user_input_refiner_app.invoke(graph_input)
-
-        return state.model_copy(update={'user_input': refined['corrected_original'] or state.user_input, 'refined_input': refined['refined_text']})
-
-    except Exception as e:
-        print('[NODE] [ERR]', e) if DEBUG else None
-        traceback.print_exc() if DEBUG else None
-        return state.model_copy(update={'error': str(e)})
-
-
 def tavily_search(state: TaskDecomposerState) -> TaskDecomposerState:
     '''
     Use Tavily to search the web for relevant information about the topic.
@@ -187,7 +171,7 @@ def tavily_search(state: TaskDecomposerState) -> TaskDecomposerState:
             if score < 0.35: # Skip irrelevant results
                 continue
 
-            summary_lines.append(f'{i}. Score: {score} - {title}\n  {content}\n')
+            summary_lines.append(f'\n{i}. Score: {score} - {title}\n  {content}\n')
 
         web_summary = '\n---\n'.join(summary_lines) if summary_lines else 'No relevant web results found.'
 
@@ -230,16 +214,15 @@ def decompose_prompt(state: TaskDecomposerState) -> TaskDecomposerState:
         )
 
         # call the LLM, and ensure it returns a TaskPlan
-        response = llm.with_structured_output(TaskPlan).invoke(
-            [SystemMessage(content= prompt)]# + [HumanMessage(content= state.user_input)]
+        response = decomposer.invoke(
+            [SystemMessage(content= prompt)]
         )
 
         # update the state
         if state.output and state.output == response:
             state.stop()
 
-        if DEBUG and state.output:
-            print(f'[NODE] [INFO] Previous output: {state.output.model_dump_json()}')
+        print(f'[NODE] [INFO] Previous output: {state.output.model_dump_json()}') if DEBUG and state.output else None
         print(f'[NODE] [INFO] New output: {response.model_dump_json()}') if DEBUG else None
 
         return state.model_copy(update={'output': response})
@@ -264,12 +247,10 @@ def should_continue(state: TaskDecomposerState) -> Literal['decompose_prompt', '
 ''' Graph '''
 task_decomposer_graph = StateGraph(TaskDecomposerState)
 
-task_decomposer_graph.add_node('refiner', refine_user_input)
 task_decomposer_graph.add_node('tavily_search', tavily_search)
 task_decomposer_graph.add_node('decompose_prompt', decompose_prompt)
 
-task_decomposer_graph.add_edge(START, 'refiner')
-task_decomposer_graph.add_edge('refiner', 'tavily_search')
+task_decomposer_graph.add_edge(START, 'tavily_search')
 task_decomposer_graph.add_edge('tavily_search', 'decompose_prompt')
 task_decomposer_graph.add_conditional_edges(
     'decompose_prompt', 
@@ -289,7 +270,7 @@ if __name__ == '__main__':
     from IPython.display import Image
 
     # Visualize the graph
-    Image(task_decomposer_app.get_graph().draw_mermaid_png())
+    Image(task_decomposer_app.get_graph().draw_mermaid_png(max_retries= 5, retry_delay= 2.0))
     parent_dir = Path(__file__).resolve().parent
     if not os.path.exists(parent_dir / 'graphs'):
         os.makedirs(parent_dir / 'graphs')
@@ -317,7 +298,7 @@ if __name__ == '__main__':
     # 'I want an agent to help me, guide me and test me on my math course.'
     # 'I want an agent that thinks and creates tools for LLM agents to use, for specific topics, which will be provided by the user.'
     # 'I want an agent that helps me about the most difficult topic today (1).'
-    user = TaskDecomposerState(user_input= 'I want a personall fitness coach.')
+    user = TaskDecomposerState(user_input= 'I want an agent that accepts a user input, then first corrects it, and after understanding it thoroughly (can ask questions), refines it into a well structured prompt for llms to use.')
     result = task_decomposer_app.invoke(user, config)
 
     print('\n[MAIN]', result)
