@@ -2,6 +2,7 @@
 Multi-agent system for the thesis.
 
 `author:` Stefanos Panteli
+`github:` https://github.com/stefanosPanteli/EPL-thesis
 
 # Run Steps
 ## To use:
@@ -22,6 +23,7 @@ Multi-agent system for the thesis.
 cd .\to the clone directory
 
 python -m venv venv # Creates the virtual environment named venv
+.\venv\Scripts\Activate.ps1 # Activate the venv
 pip install -r requirements.txt # Installs the requirements
 
 #! Modify the .env.example file
