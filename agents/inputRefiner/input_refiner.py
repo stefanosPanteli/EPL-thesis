@@ -33,7 +33,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Base
 from langchain_tavily import TavilySearch
 from langchain_openai import ChatOpenAI
 
-from langgraph.graph import StateGraph, MessagesState
+from langgraph.graph import StateGraph, MessagesState, add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.constants import END, START
 from langgraph.checkpoint.memory import MemorySaver
@@ -69,9 +69,21 @@ print(f'{BLUE}[AGENT] [INFO] [STARTUP]{RESET} Input Refiner') if DEBUG else None
 
 """ Schemas """
 ''' Input Schema '''
-class InputSchema(MessagesState):
+class InputSchema(TypedDict):
     user_input: str = Field(
         description= 'The user input to be clarified and refined.'
+    )
+
+''' Intermediate Schema '''
+class IntermediateSchema(MessagesState):
+    corrected_original: str = Field(
+        description= 'The original request with grammar and spelling fixed, vocabulary unchanged.'
+    )
+    refinements: Annotated[List[AIMessage], add_messages] = Field(
+        description= 'The LLM refinements, if any.'
+    )
+    user_requests: List[HumanMessage] = Field(
+        description= 'The user requests, if any.'
     )
 
 ''' Output Schema '''
@@ -79,7 +91,7 @@ class OutputSchema(BaseModel):
     corrected_original: str = Field(
         description= 'The original request with grammar and spelling fixed, vocabulary unchanged.'
     )
-    refined_text: Optional[str] = Field(
+    refined_text: str = Field(
         description= 'A more precise, clear, and search-friendly version of the request.'
     )
 
@@ -115,7 +127,7 @@ refiner = ChatOpenAI(
     api_key= OPENROUTER_API_KEY,
     model= 'moonshotai/kimi-k2:free', 
     temperature= 0.7
-).with_structured_output(OutputSchema)
+)
 
 
 
@@ -152,7 +164,7 @@ def _will_tool_call(messages: list[BaseMessage], actually_called: bool= False) -
 
 
 ''' Nodes'''
-def correct_user_input(state: InputSchema) -> InputSchema:
+def correct_user_input(state: InputSchema) -> IntermediateSchema:
     '''
     This node accepts a user input and provides a corrected version of it.
     '''
@@ -168,8 +180,10 @@ def correct_user_input(state: InputSchema) -> InputSchema:
 
         # Replace the message with the corrected one
         return {
-            'user_input': corrected,
-            'messages': [SystemMessage(content= f'The user\'s request: {corrected}')]
+            'messages': [HumanMessage(content= corrected)],
+            'corrected_original': corrected,
+            'refinements': [],
+            'user_requests': []
         }
 
     except Exception as e:
@@ -177,11 +191,13 @@ def correct_user_input(state: InputSchema) -> InputSchema:
         traceback.print_exc() if DEBUG else None
 
         return {
-            'user_input': user_input,
-            'messages': [SystemMessage(content= f'This is the user\'s request: {user_input}')]
+            'messages': [HumanMessage(content= user_input)],
+            'corrected_original': user_input,
+            'refinements': [],
+            'user_requests': []
         }
     
-def clarify(state: InputSchema) -> InputSchema:
+def clarify(state: IntermediateSchema) -> IntermediateSchema:
     '''
     This node accepts a corrected version of a user input and provides a refined version of it.
     '''
@@ -207,7 +223,7 @@ def clarify(state: InputSchema) -> InputSchema:
             return {'messages': [clarification]}
 
         print(f'{GREEN}[NODE] [CLARIFICATION/ASSUMPTION QUESTION]{RESET} {clarification.content}')
-        user_input = input('\n> ')
+        user_input = input(f'\n{GREEN}[NODE] [INPUT] >{RESET} ')
 
         return {'messages': [AIMessage(content = clarification.content), HumanMessage(user_input)]}
 
@@ -217,40 +233,56 @@ def clarify(state: InputSchema) -> InputSchema:
 
         return state
 
-def refine_user_input(state: InputSchema) -> OutputSchema:
+def refine_user_input(state: IntermediateSchema) -> IntermediateSchema:
     '''
     This node accepts a corrected version of a user input and provides a refined version of it.
     '''
     print(f'\n{BLUE}[NODE]{RESET} refine_user_input') if DEBUG else None
     try:
         
-        history = []
+        history: list[str] = []
         for mess in state['messages']:
             history.append(mess.pretty_repr() if isinstance(mess, BaseMessage) else str(mess))
+
+        refinements_and_requests: list[str] = []
+        refinements = state['refinements']
+        requests = state['user_requests']
+        for i in range(max(len(refinements), len(requests))):
+            if i < len(refinements):
+                refinements_and_requests.append(refinements[i].pretty_repr())
+            if i < len(requests):
+                refinements_and_requests.append(requests[i].pretty_repr())
             
         prompt = prompts.REFINE_INPUT_PROMPT.format(
-            user_input_json= json.dumps(state['user_input']),
-            history= '\n---\n\n'.join(history)
+            history= '\n---\n\n'.join(history),
+            refinements_and_requests= '\n---\n\n'.join(refinements_and_requests)
         )
 
         # call the LLM to refine
-        refined = refiner.invoke([SystemMessage(content= prompt)])
+        refined = refiner.invoke([SystemMessage(content= prompt)]).content
 
         print(f'{BLUE}[NODE] [INFO]{RESET} Refined: {refined}') if DEBUG else None
 
-        return refined
+        return {'refinements': [AIMessage(content= refined)]}
 
     except Exception as e:
         print(f'{RED}[NODE] [ERR]{RESET}', e) if DEBUG else None
         traceback.print_exc() if DEBUG else None
         
-        # Return the original user input
-        return OutputSchema(corrected_original= state['user_input'], refined_text= None)
+        # Return the original
+        return state
+
+def parse_output(state: IntermediateSchema) -> OutputSchema:
+    '''
+    This node accepts a corrected version of a user input and provides a refined version of it.
+    '''
+    print(f'\n{BLUE}[NODE]{RESET} parse_output') if DEBUG else None
+    return OutputSchema(corrected_original= state['corrected_original'], refined_text= state['refinements'][-1].content)
 
 
 
 ''' Conditional Functions '''
-def keep_clarifying(state: InputSchema) -> Literal['clarify', 'tools', 'refine']:
+def keep_clarifying(state: IntermediateSchema) -> Literal['clarify', 'tools', 'refine']:
     print(f'\n{BLUE}[NODE]{RESET} keep_clarifying') if DEBUG else None
 
     # If no further clarifications are needed
@@ -267,7 +299,7 @@ def keep_clarifying(state: InputSchema) -> Literal['clarify', 'tools', 'refine']
             # Call the llm again to make it call the tool
             state['messages'] += [clarifier.invoke([state['messages'][-1], SystemMessage(content= sys_msg)])]
             print(f'{BLUE}[NODE] [INFO]{RESET} Trying to call the tool.') if DEBUG else None
-            input('\n> ')
+            input('\n> press to continue') if DEBUG else None
 
         return 'tools'
 
@@ -275,28 +307,35 @@ def keep_clarifying(state: InputSchema) -> Literal['clarify', 'tools', 'refine']
     print(f'{BLUE}[NODE] [INFO]{RESET} Will ask for clarifications') if DEBUG else None
     return 'clarify'
 
-def refinement_okay(state: OutputSchema) -> Literal['__end__', 'refine']:
-    # TODO: can loop back to clarify
+def refinement_okay(state: IntermediateSchema) -> Literal['parse_output', 'refine']:
     '''
     This node asks the user if the refined version of the user input is okay.
     '''
     print(f'\n{BLUE}[NODE]{RESET} refinement_okay') if DEBUG else None
-    print(f'{GREEN}[NODE] [LLM RESPONSE]{RESET} {state.refined_text}')
-    answer = input(f'{GREEN}[NODE] [CONFIRMATION]{RESET} Is this okay? (y/n) > ')
 
-    if answer.lower() in ['y', 'ye', 'yea', 'yes']:
-        return END
+    # Ask the user if the refined version of the user input is okay
+    print(f'{GREEN}[NODE] [LLM RESPONSE]{RESET} {state["refinements"][-1].content}')
+    answer = input(f'{GREEN}[NODE] [CONFIRMATION]{RESET} Is this okay, if not please insert your request (y/request) > ')
+
+    # If the answer is yes, parse the output and end
+    if answer.lower() in ['y', 'ye', 'yea', 'yes', 'ok', 'okay', 'k']:
+        return 'parse_output'
+
+    # If the answer is no, ask for a new request, and keep refining
     else:
-        state.add_user_request(input('{GREEN}[NODE] [CONFIRMATION]{RESET} Please insert your request >'))
+        state['user_requests'] += [HumanMessage(answer)]
         return 'refine'
 
+
+
 ''' Graph '''
-input_refiner_graph = StateGraph(InputSchema, output_schema= OutputSchema)
+input_refiner_graph = StateGraph(IntermediateSchema, input_schema= InputSchema, output_schema= OutputSchema)
 
 input_refiner_graph.add_node('correct', correct_user_input)
 input_refiner_graph.add_node('clarify', clarify)
 input_refiner_graph.add_node('tools', ToolNode([tavily_search]))
 input_refiner_graph.add_node('refine', refine_user_input)
+input_refiner_graph.add_node('parse_output', parse_output)
 
 input_refiner_graph.add_edge(START, 'correct')
 input_refiner_graph.add_edge('correct', 'clarify')
@@ -310,15 +349,15 @@ input_refiner_graph.add_conditional_edges(
     }
 )
 input_refiner_graph.add_edge('tools', 'clarify')
-input_refiner_graph.add_edge('refine', END)
-# input_refiner_graph.add_conditional_edges(
-#     'refine',
-#     lambda state: 'refine_tools' if _will_tool_call(state['messages']) else END,
-#     {   # Not needed, but added for clarity
-#         'refine_tools': 'refine_tools',
-#         '__end__': END
-#     }
-# )
+input_refiner_graph.add_conditional_edges(
+    'refine',
+    refinement_okay,
+    {   # Not needed, but added for clarity
+        'parse_output': 'parse_output',
+        'refine': 'refine'
+    }
+)
+input_refiner_graph.add_edge('parse_output', END)
 
 input_refiner_app = input_refiner_graph.compile(checkpointer= MemorySaver())
 
@@ -351,7 +390,7 @@ if __name__ == '__main__':
         }
     }
 
-    user = {'user_input': 'i want an agent to help me with desinging a holiday.'}
+    user = {'user_input': 'make assumptions only-no clarifications will be answered. i want an agent to help me with automating online orders. The order are of food.'}
     response = input_refiner_app.invoke(user, config= config)
 
     print(f'{BLUE}[MAIN] [INFO]{RESET} Response') if DEBUG else None
